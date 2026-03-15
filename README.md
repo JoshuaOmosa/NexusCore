@@ -47,3 +47,8 @@ Testable: We can mock the repository to test logic without a database.
 Maintainable: If the table schema changes, we only update one file (the Repository), not every page in the app.
 
 Secure: Centralized use of PDO prepared statements significantly reduces the risk of SQL injection.
+
+### Installation
+1. Clone the repository.
+2. Import the `database.sql` file into your local MySQL instance (via phpMyAdmin or CLI).
+3. Configure `config/database.php` with your local credentials.
