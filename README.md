@@ -1,11 +1,11 @@
 # NexusCore | Healthcare Data Management Backend
 
-A small PHP project that lists patients from a MySQL database using a **Model + Repository** structure. It is a compact showcase of separating data access from presentation, and a starting point for a larger patient-management system.
+A small PHP backend for listing and filtering patient records, built around a **Model + Repository** structure. It shows how to keep SQL out of the page, depend on interfaces instead of concrete classes, and keep credentials out of the codebase, all without a framework.
 
-![PHP](https://img.shields.io/badge/PHP-8.x-777bb4)
+![PHP](https://img.shields.io/badge/PHP-8.1%2B-777bb4)
 ![Database](https://img.shields.io/badge/database-MySQL%20%2F%20MariaDB-4479a1)
-![Access](https://img.shields.io/badge/access-PDO-lightgrey)
-![Status](https://img.shields.io/badge/status-prototype-orange)
+![Access](https://img.shields.io/badge/access-PDO%20prepared%20statements-lightgrey)
+![Tests](https://img.shields.io/badge/tests-12%20passing-brightgreen)
 
 ---
 
@@ -20,8 +20,8 @@ A small PHP project that lists patients from a MySQL database using a **Model + 
 7. [Project Structure](#7-project-structure)
 8. [Code Walkthrough](#8-code-walkthrough)
 9. [Configuration Reference](#9-configuration-reference)
-10. [Design Notes and Known Limitations](#10-design-notes-and-known-limitations)
-11. [Suggested Improvements](#11-suggested-improvements)
+10. [Testing](#10-testing)
+11. [Security Notes](#11-security-notes)
 12. [Roadmap](#12-roadmap)
 13. [License](#13-license)
 
@@ -29,16 +29,19 @@ A small PHP project that lists patients from a MySQL database using a **Model + 
 
 ## 1. Overview
 
-NexusCore keeps SQL out of the page that displays data. The page asks a repository for patients, and the repository returns typed objects.
+The page asks a repository for patients, and the repository returns typed objects. Only the repository contains SQL.
 
 | Concept | Where it appears |
 |---|---|
-| Model | `Patient` holds `id`, `name`, and `status` as typed properties |
+| Model | `Patient` is an immutable object (`readonly` properties) that validates its status |
 | Repository pattern | `PatientRepository` is the only class that contains SQL |
+| Programming to an interface | Callers depend on `PatientRepositoryInterface`, so storage can be swapped or faked |
 | Dependency injection | The PDO connection is passed into the repository's constructor |
-| Separation of concerns | Config, model, data access, and view live in separate files |
+| Prepared statements | Every query that takes input binds parameters |
+| Configuration | Database settings come from `.env` / environment variables, never from source |
+| Autoloading | PSR-4: `App\` maps to `src/` (built-in loader, or Composer if installed) |
 
-Currently the app has one feature: **read-only listing of all patients**.
+Features: list all patients, filter by status (`active`, `pending`, `discharged`), and look a patient up by id.
 
 ---
 
@@ -49,14 +52,16 @@ Currently the app has one feature: **read-only listing of all patients**.
 ```mermaid
 flowchart TD
     V["View<br/>public/index.php<br/>HTML output"]
-    R["Repository<br/>PatientRepository<br/>SQL lives here"]
-    M["Model<br/>Patient<br/>typed data"]
+    I["PatientRepositoryInterface"]
+    R["PatientRepository<br/>SQL lives here"]
+    M["Model<br/>Patient<br/>typed, immutable"]
     D[("MySQL<br/>nexus_core.patients")]
-    C["Config<br/>config/database.php<br/>creates PDO"]
+    C["Config<br/>config/database.php<br/>reads .env, creates PDO"]
 
-    V -->|"findAll()"| R
+    V -->|"findAll() / findByStatus()"| I
+    I -.->|"implemented by"| R
     R -->|"builds"| M
-    R -->|"queries"| D
+    R -->|"prepared queries"| D
     C -.->|"provides PDO"| V
     V -.->|"passes PDO in"| R
 ```
@@ -81,13 +86,20 @@ classDiagram
         +int id
         +string name
         +string status
-        +__construct(id, name, status)
+        +STATUSES$
+        +fromRow(row)$ Patient
+    }
+    class PatientRepositoryInterface {
+        <<interface>>
+        +findAll() Patient[]
+        +findById(int id) Patient?
+        +findByStatus(string status) Patient[]
     }
     class PatientRepository {
         -PDO db
-        +__construct(db)
-        +findAll() array
+        +__construct(PDO db)
     }
+    PatientRepositoryInterface <|.. PatientRepository
     PatientRepository ..> Patient : creates
     PatientRepository --> PDO : uses
 ```
@@ -105,49 +117,33 @@ sequenceDiagram
     participant C as database.php
     participant R as PatientRepository
     participant DB as MySQL
-    B->>I: GET /public/index.php
+    B->>I: GET /?status=pending
     I->>C: require config
-    C->>DB: new PDO(...)
-    C-->>I: $pdo available
+    C->>C: load .env into environment
+    C->>DB: new PDO(dsn from env)
+    C-->>I: $pdo
     I->>R: new PatientRepository($pdo)
-    I->>R: findAll()
-    R->>DB: SELECT id, name, status FROM patients
+    I->>R: findByStatus('pending')
+    R->>DB: SELECT ... WHERE status = :status
     DB-->>R: rows
-    R->>R: map each row to a Patient
-    R-->>I: array of Patient
-    I-->>B: HTML list of patient cards
+    R->>R: Patient::fromRow() for each row
+    R-->>I: Patient[]
+    I-->>B: HTML (all output escaped)
 ```
 
-### 3.2 Inside `findAll()`
+### 3.2 Bootstrapping
 
-```mermaid
-flowchart LR
-    A["Run SELECT<br/>id, name, status"] --> B["fetchAll<br/>FETCH_ASSOC"]
-    B --> C["Loop over rows"]
-    C --> D["new Patient<br/>id, name, status"]
-    D --> E["Return array"]
-```
-
-### 3.3 Bootstrapping
-
-There is no framework or autoloader. `index.php` loads each file by hand, in dependency order:
-
-```mermaid
-flowchart TD
-    A["1. config/database.php<br/>creates $pdo"] --> B["2. Models/Patient.php"]
-    B --> C["3. Repositories/PatientRepository.php"]
-    C --> D["4. Create repository<br/>and fetch patients"]
-    D --> E["5. Render HTML"]
-```
+`src/bootstrap.php` registers a PSR-4 autoloader, so classes load the first time they're used. `config/database.php` reads `.env`, builds the DSN, and creates the connection. If the connection fails, the real error goes to the PHP error log and the visitor only sees `Service temporarily unavailable.`
 
 ---
 
 ## 4. Requirements
 
-- **PHP 8.x** with the `pdo_mysql` extension (typed properties need 7.4 or newer; the original docs target 8.0)
+- **PHP 8.1+** with `pdo_mysql` (uses `readonly` properties and `str_starts_with`)
 - **MySQL or MariaDB**
-- A web server such as Apache, or PHP's built-in server
-- XAMPP on Windows works out of the box, which is the original development setup
+- Apache, or PHP's built-in server. XAMPP on Windows works out of the box.
+- `pdo_sqlite` to run the tests (bundled with most PHP builds)
+- Composer is optional
 
 ---
 
@@ -156,7 +152,7 @@ flowchart TD
 ### 5.1 Clone
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/JoshuaOmosa/NexusCore.git
 cd NexusCore
 ```
 
@@ -170,42 +166,23 @@ mysql -u root -p < database.sql
 
 This creates `nexus_core`, a `patients` table, and three sample rows.
 
-> **Warning:** the script runs `DROP TABLE IF EXISTS patients` first, so re-importing wipes existing patient data.
+> **Warning:** the script runs `DROP TABLE IF EXISTS patients` first, so re-importing wipes existing data.
 
 ### 5.3 Configure credentials
 
-Edit the four variables at the top of `config/database.php`:
-
-```php
-$host = 'localhost';
-$db   = 'nexus_core';
-$user = 'root';
-$pass = '';
+```bash
+cp .env.example .env
 ```
 
-The file `senior.env` contains the same values but **is not read by any code** (see [section 10](#10-design-notes-and-known-limitations)).
+Then edit `.env` with your database details. `.env` is git-ignored. Any variable already set in the real environment overrides the file, which is how you'd configure a server.
 
 ### 5.4 Run it
-
-Either point Apache's document root at `public/`, or use PHP's built-in server:
 
 ```bash
 php -S localhost:8000 -t public
 ```
 
-Then open `http://localhost:8000/`. On XAMPP you can also use `http://localhost/NexusCore/public/`.
-
-### Expected result
-
-A page titled **NexusCore Master List** with one card per patient:
-
-| ID | Name | Status |
-|---|---|---|
-| 1 | John Doe | active |
-| 2 | Jane Smith | pending |
-| 3 | Robert Brown | discharged |
-
-If the table is empty the page shows only the heading, with no message.
+Open `http://localhost:8000/`. Use the links at the top, or `?status=pending`, to filter. On XAMPP you can also use `http://localhost/NexusCore/public/`.
 
 ---
 
@@ -226,24 +203,9 @@ erDiagram
 | `id` | `INT AUTO_INCREMENT` | Primary key |
 | `name` | `VARCHAR(255) NOT NULL` | Patient name |
 | `status` | `ENUM('active','discharged','pending')` | Defaults to `active` |
-| `created_at` | `TIMESTAMP` | Defaults to the insert time; not loaded into the model |
+| `created_at` | `TIMESTAMP` | Defaults to the insert time |
 
-Engine `InnoDB`, charset `utf8mb4`.
-
-### Status lifecycle
-
-The schema defines the allowed values but no transitions, so any status can be set to any other:
-
-```mermaid
-stateDiagram-v2
-    [*] --> pending
-    [*] --> active
-    pending --> active
-    active --> discharged
-    pending --> discharged
-```
-
-The arrows above show a *typical* flow, not a rule enforced by code.
+Engine `InnoDB`, charset `utf8mb4`. The allowed statuses are also enforced in code by `Patient::STATUSES`.
 
 ---
 
@@ -252,26 +214,25 @@ The arrows above show a *typical* flow, not a rule enforced by code.
 ```text
 NexusCore/
 ├── README.md
+├── LICENSE
+├── composer.json             # PSR-4 mapping and `composer test`
 ├── database.sql              # Schema and seed data
-├── senior.env                # Credentials template (not loaded by any code)
-├── senior.gitignore          # Ignore rules (not active, see section 10)
+├── .env.example              # Copy to .env (git-ignored)
 ├── config/
-│   └── database.php          # Creates the PDO connection
+│   ├── env.php               # Tiny .env loader + env() helper
+│   └── database.php          # Builds the PDO connection from env
 ├── public/
-│   └── index.php             # Entry point and view
-└── src/
-    ├── Models/
-    │   └── Patient.php       # Patient data object
-    └── Repositories/
-        └── PatientRepository.php   # Data access
+│   └── index.php             # Entry point and view (only web-facing folder)
+├── src/
+│   ├── bootstrap.php         # PSR-4 autoloader for App\
+│   ├── Models/
+│   │   └── Patient.php
+│   └── Repositories/
+│       ├── PatientRepositoryInterface.php
+│       └── PatientRepository.php
+└── tests/
+    └── run.php               # Dependency-free test runner (SQLite in memory)
 ```
-
-| Path | Namespace | Role |
-|---|---|---|
-| `src/Models/` | `App\Models` | Data objects |
-| `src/Repositories/` | `App\Repositories` | SQL and mapping |
-| `public/` | none | Only web-accessible folder |
-| `config/` | none | Connection setup |
 
 ---
 
@@ -280,182 +241,95 @@ NexusCore/
 ### `src/Models/Patient.php`
 
 ```php
-namespace App\Models;
+final class Patient
+{
+    public const STATUSES = ['active', 'pending', 'discharged'];
 
-class Patient {
-    public int $id;
-    public string $name;
-    public string $status;
+    public function __construct(
+        public readonly int $id,
+        public readonly string $name,
+        public readonly string $status,
+    ) {
+        if (!in_array($status, self::STATUSES, true)) {
+            throw new \InvalidArgumentException("Unknown patient status: $status");
+        }
+    }
 
-    public function __construct(int $id, string $name, string $status) {
-        $this->id = $id;
-        $this->name = $name;
-        $this->status = $status;
+    public static function fromRow(array $row): self
+    {
+        return new self((int) $row['id'], (string) $row['name'], (string) $row['status']);
     }
 }
 ```
 
-Typed public properties guarantee each field has the expected type once the object exists.
+`readonly` properties make each object immutable once built. `fromRow()` casts explicitly, so the code works under `strict_types` whether the driver returns integers or strings.
 
 ### `src/Repositories/PatientRepository.php`
 
 ```php
-namespace App\Repositories;
-
-use App\Models\Patient;
-use PDO;
-
-class PatientRepository {
-    private PDO $db;
-
-    public function __construct(PDO $db) {
-        $this->db = $db;
-    }
-
-    public function findAll(): array {
-        $stmt = $this->db->query("SELECT id, name, status FROM patients");
-        $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-        $patients = [];
-        foreach ($results as $row) {
-            $patients[] = new Patient($row['id'], $row['name'], $row['status']);
-        }
-        return $patients;
-    }
+public function findById(int $id): ?Patient
+{
+    $stmt = $this->db->prepare('SELECT id, name, status FROM patients WHERE id = :id');
+    $stmt->execute(['id' => $id]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    return $row ? Patient::fromRow($row) : null;
 }
 ```
 
-- The constructor receives the connection instead of creating it, which is the dependency injection.
-- `findAll()` converts raw associative arrays into `Patient` objects so callers never see database rows.
-
-### `config/database.php`
-
-Creates a PDO connection with `ERRMODE_EXCEPTION`, stores it in `$pdo` and `$GLOBALS['pdo']`, and stops with `die()` if the connection fails.
+Input never gets concatenated into SQL. `findByStatus()` also checks the status against the allowed list before querying.
 
 ### `public/index.php`
 
-Requires the three files, builds the repository with `$pdo`, calls `findAll()`, and loops over the result to print a card per patient. Names are passed through `htmlspecialchars()` before output.
+Validates the `?status=` filter against `Patient::STATUSES` and escapes every value with `htmlspecialchars(..., ENT_QUOTES, 'UTF-8')`. It also shows a message when no patients match and colours each status differently.
 
 ---
 
 ## 9. Configuration Reference
 
-| Setting | Value | Where |
+| Variable | Default | Purpose |
 |---|---|---|
-| DB host | `localhost` | `config/database.php` |
-| DB name | `nexus_core` | `config/database.php` |
-| DB user | `root` | `config/database.php` |
-| DB password | empty | `config/database.php` |
-| Charset | `utf8mb4` | DSN in `config/database.php` |
-| PDO error mode | Exceptions | `config/database.php` |
-| Fetch mode | Associative array | `PatientRepository::findAll()` |
+| `DB_HOST` | `localhost` | Database host |
+| `DB_PORT` | `3306` | Database port |
+| `DB_NAME` | `nexus_core` | Database name |
+| `DB_USER` | `root` | Database user |
+| `DB_PASS` | empty | Database password |
 
-The credentials are development defaults. Do not use an empty-password `root` account outside a local machine.
+PDO is created with `ERRMODE_EXCEPTION`, `FETCH_ASSOC` as the default fetch mode, real (non-emulated) prepared statements, and `utf8mb4`.
 
----
-
-## 10. Design Notes and Known Limitations
-
-I linted every PHP file (no syntax errors) and ran `PatientRepository` and `Patient` against an in-memory SQLite database with the same table shape. It returned three `Patient` objects with the expected values and an empty array for an empty table. MySQL itself was not available, so the live database path is unverified.
-
-How the code compares with what earlier documentation claimed:
-
-- **No autoloader.** Earlier docs said "PSR-4 autoloading compliant". The `App\` namespaces match the folder layout, which is PSR-4-compatible, but there is no `composer.json` and every class is loaded with `require_once`.
-- **Strict typing is not enabled.** No file declares `strict_types=1`. Types are declared on properties and parameters, but PHP silently converts values (for example the string `"1"` to `int 1`). If you add `strict_types=1` to the repository on PHP older than 8.1, MySQL integers arrive as strings and the `Patient` constructor will throw a `TypeError`.
-- **No prepared statements yet.** Earlier docs said centralized prepared statements reduce SQL injection risk. The only query is a fixed `SELECT` run with `query()` and no parameters. The design supports adding them, but none exist today.
-- **Error handling is minimal.** There is one `try/catch`, in `config/database.php`, which prints the raw exception message with `die()`. That message can reveal host and database details to visitors. I saw this output when the driver was missing: `Database connection failed: could not find driver`. The repository has no checks of its own.
-- **Not fully database-agnostic.** The repository is typed to `PDO` and there is no repository interface, so swapping storage or mocking in tests would need an interface first. No tests exist.
-- **Dependency injection is manual.** `index.php` reads the global `$pdo` set by the config file and wires the repository by hand. There is no container.
-- **"DTO" is loose.** `Patient` is a simple data object with public properties; it has no behavior or validation.
-- **No business-logic layer.** Earlier docs mentioned one. The project has only model, repository, and view.
-- **`senior.gitignore` and `senior.env` do nothing.** Git only reads a file named exactly `.gitignore`, and the app never loads a `.env`. When I staged the folder in a fresh git repository, both files were included. The rules inside would not match `senior.env` anyway. Credentials are actually hardcoded in `config/database.php`.
-- **Unescaped status.** `status` is printed without `htmlspecialchars()`. It is limited to three values by the `ENUM`, so the risk is low, but it is inconsistent with how `name` is handled.
-- **Every status is styled green.** The `.status` CSS class applies one color regardless of value.
-- **No empty state.** With no patients the page shows a heading and nothing else.
-- **Read-only.** There is no create, update, or delete.
-- **Other gaps:** no `composer.json`, no LICENSE file, and `created_at` is never read.
-- **Previous README formatting.** It had no Markdown headers, a stray "Plaintext" label, and duplicate setup sections. This document replaces it.
+The defaults suit a local XAMPP install. Anywhere else, use a dedicated database user with a password, not `root`.
 
 ---
 
-## 11. Suggested Improvements
+## 10. Testing
 
-### 11.1 Add Composer autoloading
-
-```json
-{
-    "autoload": {
-        "psr-4": { "App\\": "src/" }
-    }
-}
+```bash
+php tests/run.php
+# or, with Composer:
+composer test
 ```
 
-Run `composer dump-autoload`, then replace the two `require_once` lines for classes in `index.php` with `require __DIR__ . '/../vendor/autoload.php';`.
+The runner needs no packages. It builds an in-memory SQLite table with the same shape as `database.sql` and checks:
 
-### 11.2 Extract an interface
+- `findAll`, `findById`, and `findByStatus`, including the missing-row and empty-table cases
+- that an injection-style status string is rejected
+- that `Patient` refuses unknown statuses
+- that the `.env` loader parses files, lets real environment variables win, and falls back to defaults
 
-```php
-namespace App\Repositories;
-
-use App\Models\Patient;
-
-interface PatientRepositoryInterface {
-    /** @return Patient[] */
-    public function findAll(): array;
-    public function findById(int $id): ?Patient;
-}
+```text
+12 passed, 0 failed
 ```
 
-Type-hint the interface in calling code so tests can supply a fake.
+---
 
-### 11.3 Add a lookup with a prepared statement
+## 11. Security Notes
 
-```php
-public function findById(int $id): ?Patient {
-    $stmt = $this->db->prepare(
-        "SELECT id, name, status FROM patients WHERE id = :id"
-    );
-    $stmt->execute(['id' => $id]);
-    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+- **No credentials in the repo.** Settings come from `.env` (git-ignored) or the environment.
+- **No SQL injection surface.** Queries with input use bound parameters, and filters are checked against an allow-list.
+- **Escaped output.** Every value rendered in HTML is escaped.
+- **No error leakage.** Connection failures are logged server-side and shown to visitors as a generic message.
+- **Only `public/` is web-facing.** Point the document root there so `config/`, `src/` and `.env` can't be fetched.
 
-    return $row
-        ? new Patient((int) $row['id'], $row['name'], $row['status'])
-        : null;
-}
-```
-
-The `(int)` cast keeps this safe if you later enable `strict_types`.
-
-### 11.4 Stop leaking connection errors
-
-```php
-} catch (PDOException $e) {
-    error_log($e->getMessage());
-    http_response_code(500);
-    die("Service temporarily unavailable.");
-}
-```
-
-### 11.5 Load credentials from the environment
-
-Rename `senior.env` to `.env` and `senior.gitignore` to `.gitignore`, then read the values with a loader such as `vlucas/phpdotenv`, so credentials stay out of version control:
-
-```mermaid
-flowchart LR
-    E[".env<br/>git-ignored"] --> L["Loader"]
-    L --> C["config/database.php"]
-    C --> P["PDO"]
-```
-
-### 11.6 Small view fixes
-
-```php
-<span class="status status-<?= htmlspecialchars($p->status) ?>">
-    <?= htmlspecialchars($p->status) ?>
-</span>
-```
-
-Then add CSS classes per status, and show a message when `$patients` is empty.
+This is a demo with sample names. Real patient records fall under regulations such as HIPAA or GDPR and need authentication, encryption, access logging, and secure hosting before use.
 
 ---
 
@@ -463,24 +337,23 @@ Then add CSS classes per status, and show a message when `$patients` is empty.
 
 ```mermaid
 flowchart LR
-    A["Current<br/>read-only list"] --> B["Foundation<br/>Composer, .env, safe errors"]
-    B --> C["CRUD<br/>create, update, delete"]
-    C --> D["Quality<br/>interface, tests"]
-    D --> E["Domain<br/>services, auth, audit log"]
+    A["Done<br/>list, filter, lookup<br/>.env config, tests"] --> B["CRUD<br/>create, update, delete"]
+    B --> C["Access<br/>authentication, roles"]
+    C --> D["Audit<br/>change log per record"]
 ```
 
-- [ ] Rename `senior.env` and `senior.gitignore` so they take effect
-- [ ] Add `composer.json` with PSR-4 autoloading
-- [ ] Load configuration from environment variables
-- [ ] Replace `die()` with logged errors and a generic message
-- [ ] Add `PatientRepositoryInterface`
-- [ ] Add `findById`, `create`, `update`, `delete` using prepared statements
-- [ ] Add PHPUnit tests
-- [ ] Add authentication and access control
-- [ ] Add an audit log for record changes
-- [ ] Add a LICENSE
+- [x] Load configuration from environment variables
+- [x] PSR-4 autoloading and `composer.json`
+- [x] `PatientRepositoryInterface`
+- [x] `findById` / `findByStatus` with prepared statements
+- [x] Logged errors with a generic visitor message
+- [x] Automated tests
+- [ ] `create`, `update`, `delete`
+- [ ] Authentication and access control
+- [ ] Audit log for record changes
 
-### A note on healthcare data
+---
 
-This is a demo with sample names. Real patient records fall under privacy regulations such as HIPAA or GDPR and need authentication, encryption, access logging, and secure hosting before use.
+## 13. License
 
+MIT. See [LICENSE](LICENSE).

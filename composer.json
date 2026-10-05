@@ -1,0 +1,16 @@
+{
+    "name": "joshuaomosa/nexuscore",
+    "description": "Patient management backend demonstrating the Repository pattern in PHP",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.1",
+        "ext-pdo": "*"
+    },
+    "autoload": {
+        "psr-4": { "App\\": "src/" }
+    },
+    "scripts": {
+        "test": "php tests/run.php"
+    }
+}
